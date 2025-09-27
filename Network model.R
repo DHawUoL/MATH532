@@ -57,7 +57,13 @@ nodeRemoval <- function(A, frac, by = "rand") {
 
 ################################################################################
 
-runSimulation <- function(A, R0, frac = 0, plotOutput = TRUE, plotType = "traj", modelType = "SIR", seed = NULL) {
+library(igraph)
+library(ggplot2)
+library(tibble)
+library(dplyr)
+
+runSimulation <- function(A, R0, frac = 0, plotOutput = TRUE, modelType = "SIR",
+                          seed = NULL, savePlot = FALSE, filename = NULL) {
   if (!is.null(seed)) set.seed(seed)
   
   No_sims <- 5
@@ -82,31 +88,39 @@ runSimulation <- function(A, R0, frac = 0, plotOutput = TRUE, plotType = "traj",
   sigma <- 1 / T_E
   beta <- R0 * g / denom
   
-  I_mat <- NULL
+  all_sims <- list()
   
   for (i in seq_len(No_sims)) {
     sim <- simulateOutbreak(A, I0, beta, g, sigma, max(TSPAN), modelType, trackIndividuals = FALSE)
     I_out <- store_out(sim$out, TSPAN)
-    I_mat <- rbind(I_mat, I_out / No)
+    df <- tibble(time = TSPAN, prevalence = I_out / No, sim = paste0("sim_", i))
+    all_sims[[i]] <- df
   }
+  
+  df_all <- bind_rows(all_sims)
   
   if (plotOutput) {
-    lw <- 3
-    lw2 <- 0.5
-    K <- seq(1, length(TSPAN), by = 2)
+    p <- ggplot(df_all, aes(x = time, y = prevalence, group = sim)) +
+      geom_line(color = "grey70", size = 0.5) +
+      stat_summary(aes(group = 1), fun = mean, geom = "line", color = "black", size = 1) +
+      labs(
+        title = paste(modelType, "Epidemic Over Time"),
+        subtitle = paste0("R0 = ", R0),
+        x = "Time", y = "Prevalence"
+      ) +
+      theme_minimal()
     
-    matplot(
-      TSPAN[K], t(I_mat[, K]), type = "l",
-      col = gray(0.7), lty = 1, lwd = lw2,
-      xlab = "Time", ylab = "Prevalence", main = paste(modelType, "Epidemic Over Time")
-    )
-    lines(TSPAN[K], colMeans(I_mat[, K], na.rm = TRUE), col = "black", lwd = lw)
-    grid(); box()
+    print(p)
+    
+    if (savePlot) {
+      if (is.null(filename)) {
+        filename <- paste0(modelType, "_R0-", R0, ".png")
+      }
+      ggsave(filename, plot = p, width = 6, height = 4)
+    }
   }
   
-  f <- colSums(I_mat, na.rm = TRUE)
-  f[f > 0] <- 1
-  return(f)
+  return(df_all)
 }
 
 ################################################################################

@@ -1,0 +1,403 @@
+---
+title: "MATH532 Practical 1 (Student) — Networks & Metrics (LO2)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(igraph)
+  library(tidyverse)
+  library(MASS)
+})
+
+set.seed(532)
+
+safe_mean_distance <- function(g) suppressWarnings(mean_distance(g, unconnected = TRUE))
+
+giant_component_vertices <- function(g) {
+  cc <- components(g)
+  which(cc$membership == which.max(cc$csize))
+}
+
+TODO <- function(msg) stop(msg, call. = FALSE)
+```
+
+---
+
+## Section A — Graph families & baseline metrics (guided)
+
+### Instructions
+
+1. Construct graphs:
+
+   * Erdős–Rényi (G(N,p))
+   * Ring lattice (Watts–Strogatz with (p=0))
+   * Preferential attachment
+   * Random modular graph
+2. For each, construct a **degree-matched configuration model**.
+3. Compute: mean(k), var(k), global clustering, average path length (APL), giant component fraction.
+4. Present results in a table and write **2–3 bullet comparisons**.
+
+### Familiarise
+
+```{r A-familiarise}
+g_demo <- erdos.renyi.game(200, p.or.m = 0.02, type = "gnp", directed = FALSE)
+
+tibble(k = degree(g_demo)) |>
+  ggplot(aes(k)) +
+  geom_histogram(bins=40, color="white") +
+  labs(title="Demo ER degree histogram") +
+  theme_minimal()
+```
+
+### Provided builders
+
+```{r A-builders}
+build_er <- function(N, p = 0.0025) {
+  erdos.renyi.game(N, p.or.m = p, type = "gnp", directed = FALSE)
+}
+
+build_ws <- function(N, nei = 5, p = 0) {
+  g <- sample_smallworld(1, N, nei = nei, p = p)
+  g <- as.undirected(g, "collapse")
+  simplify(g)
+}
+
+build_pa <- function(N, m = 3) {
+  sample_pa(N, m = m, directed = FALSE)
+}
+
+build_modular <- function(N, islands.n = 6, pin = 0.15, n.inter = 50) {
+  g <- sample_islands(islands.n, floor(N / islands.n), pin, n.inter)
+  simplify(g)
+}
+
+build_config_from_deg <- function(k) {
+  g <- tryCatch(
+    sample_degseq(k, method = "simple.no.multiple"),
+    error = function(e) sample_degseq(k, method = "simple")
+  )
+  g <- as.undirected(g, "collapse")
+  simplify(g)
+}
+```
+
+### Task A: run graphs + compute metrics
+
+```{r A-metrics}
+N <- 3000
+g_er   <- build_er(N)
+g_ws0  <- build_ws(N, nei = 5, p = 0)
+g_pa   <- build_pa(N, m = 3)
+g_mod  <- build_modular(N)
+g_conf <- build_config_from_deg(degree(g_er))
+
+metrics_tbl <- tibble(
+  model  = c("ER","WS0","PA","Modular","Config(deg=ER)"),
+  mean_k = c(mean(degree(g_er)), mean(degree(g_ws0)),
+             mean(degree(g_pa)), mean(degree(g_mod)), mean(degree(g_conf))),
+  var_k  = c(var(degree(g_er)),  var(degree(g_ws0)),
+             var(degree(g_pa)),  var(degree(g_mod)), var(degree(g_conf))),
+  CC     = c(transitivity(g_er,"global"), transitivity(g_ws0,"global"),
+             transitivity(g_pa,"global"), transitivity(g_mod,"global"),
+             transitivity(g_conf,"global")),
+  APL    = c(safe_mean_distance(g_er), safe_mean_distance(g_ws0),
+             safe_mean_distance(g_pa), safe_mean_distance(g_mod),
+             safe_mean_distance(g_conf)),
+  GCfrac = c(max(components(g_er)$csize)/N,
+             max(components(g_ws0)$csize)/N,
+             max(components(g_pa)$csize)/N,
+             max(components(g_mod)$csize)/N,
+             max(components(g_conf)$csize)/N)
+)
+
+metrics_tbl
+```
+
+### Reflection A (write 2–3 bullets)
+
+* Why does preferential attachment have high var(k)?
+* Why is Config(deg=ER) triangle-poor despite matching degrees?
+
+---
+
+## Section B — CCDF (light coding)
+
+### Instructions
+
+1. Implement CCDF(k) = P(K ≥ k).
+2. Plot CCDFs for ER, WS0, PA, Modular on log–log axes.
+3. Why is CCDF preferable to histograms for diagnosing heavy tails?
+
+### TODO function
+
+```{r B-ccdf, eval=FALSE}
+compute_ccdf <- function(k) {
+  # TODO:
+  # - tabulate k (table())
+  # - turn into numeric tibble sorted by k
+  # - pmf = Freq / sum(Freq)
+  # - ccdf = reverse cumulative sum of pmf
+  TODO("TODO (Section B): implement compute_ccdf(k)")
+}
+```
+
+### Task B: plot CCDF
+
+```{r B-plot, eval=FALSE}
+ccdf_df <- bind_rows(
+  compute_ccdf(degree(g_er))  |> mutate(model="ER"),
+  compute_ccdf(degree(g_ws0)) |> mutate(model="WS0"),
+  compute_ccdf(degree(g_pa))  |> mutate(model="PA"),
+  compute_ccdf(degree(g_mod)) |> mutate(model="Modular")
+)
+
+ggplot(ccdf_df, aes(k, ccdf, color=model)) +
+  geom_line() +
+  scale_x_log10() + scale_y_log10() +
+  theme_minimal() +
+  labs(title="Degree CCDF", y="P(K ≥ k)")
+```
+
+### Reflection B
+
+* Why does CCDF help detect heavy tails?
+
+---
+
+## Section C — Local clustering via (A^3) (Main task #1)
+
+### Instructions
+
+1. Triangle count per node: (T_i = (A^3)_{ii}/2).
+2. Local clustering: (C_i = 2T_i / (k_i(k_i-1))) for (k_i \ge 2).
+3. Global clustering: mean of valid (C_i).
+4. Validate against `igraph::transitivity()`.
+
+```{r C-stubs, eval=FALSE}
+local_clustering_A3 <- function(A) {
+  # INPUT: A is 0/1 symmetric adjacency matrix with zero diagonal
+  # OUTPUT: numeric vector C_i
+  # TODO:
+  #   - k <- rowSums(A)
+  #   - tri <- diag(A %*% A %*% A) / 2
+  #   - compute C_i for k>=2
+  TODO("TODO (Section C): implement local_clustering_A3(A)")
+}
+
+global_from_local <- function(A) {
+  # TODO: mean of C_i over nodes with k>=2
+  TODO("TODO (Section C): implement global_from_local(A)")
+}
+```
+
+### Validation run
+
+```{r C-validate, eval=FALSE}
+idx <- sample(giant_component_vertices(g_ws0), 1200)
+A_sub <- as.matrix(as_adj(g_ws0, sparse=FALSE))[idx, idx]
+g_sub <- induced_subgraph(g_ws0, idx)
+
+C_loc <- global_from_local(A_sub)
+C_igr <- transitivity(g_sub, "global")
+
+cat("Your global C (A^3) =", C_loc, "\n")
+cat("igraph transitivity  =", C_igr, "\n")
+```
+
+### Reflection C
+
+* Why does (\mathrm{diag}(A^3)/2) count triangles?
+
+---
+
+## Section D — Watts–Strogatz (C(p)/C(0)) and (L(p)/L(0)) (Main task #2)
+
+### Instructions
+
+1. Scan over (p \in {10^{-8},10^{-6},\dots,1}).
+2. Compute and plot:
+
+   * (C(p)/C(0))
+   * (L(p)/L(0))
+3. Identify “small-world” regime: (L) drops sharply while (C) remains high.
+
+```{r D-stub, eval=FALSE}
+ws_scan <- function(N, nei, p_grid, C0, L0) {
+  # TODO:
+  # - loop over p_grid
+  # - build WS graph using build_ws()
+  # - compute C = transitivity(...,"global")
+  # - compute L = mean_distance(..., unconnected=TRUE)
+  # - return tibble(p, C_ratio, L_ratio)
+  TODO("TODO (Section D): implement ws_scan()")
+}
+```
+
+```{r D-run, eval=FALSE}
+p_grid <- c(1e-8,1e-6,1e-5,1e-4,1e-3,1e-2,1e-1,3e-1,1)
+C0 <- transitivity(g_ws0,"global")
+L0 <- safe_mean_distance(g_ws0)
+
+sw <- ws_scan(N=3000, nei=5, p_grid=p_grid, C0=C0, L0=L0)
+
+ggplot(sw, aes(p, C_ratio)) +
+  geom_line() + scale_x_log10() +
+  theme_minimal() + labs(title="C(p)/C(0)")
+
+ggplot(sw, aes(p, L_ratio)) +
+  geom_line() + scale_x_log10() +
+  theme_minimal() + labs(title="L(p)/L(0)")
+```
+
+### Reflection D
+
+* Mark the small-world regime and describe it in 2–3 sentences.
+
+---
+
+## Section E — Contact network from diary-like data (Main task #3)
+
+### Instructions (pipeline)
+
+1. Fit NegBin models for outside-household contacts by age band.
+2. Create a synthetic population using:
+
+   * household size distribution
+   * **greedy household packing**
+3. Sample outside-household contacts using fitted NegBin.
+4. Build network:
+
+   * household cliques
+   * outside-household stub matching
+5. Compute metrics and run a small sensitivity analysis.
+
+**Greedy packing (definition):** assign households sequentially. Take next unassigned person (i), read their sampled household size (s_i), assign (i,\dots,i+s_i-1) to the same household, then continue.
+
+> This section is intentionally more open-ended. If you get stuck, consult the answers script, but be able to explain each step.
+
+### Load data (or use toy data)
+
+```{r E-data}
+file_path <- "contact_survey_clean.csv"
+if (!file.exists(file_path)) {
+  contacts_df <- tibble(
+    id=1:2000,
+    age=sample(0:80, 2000, replace=TRUE),
+    hh_size=sample(1:6, 2000, replace=TRUE, prob=c(.30,.30,.18,.12,.06,.04)),
+    contacts_outside_hh=rnbinom(2000, size=2, mu=6)
+  )
+} else {
+  contacts_df <- readr::read_csv(file_path, show_col_types=FALSE)
+}
+
+cut_age <- function(x) cut(x, breaks=c(-Inf,12,25,65,Inf),
+                           labels=c("child","young","adult","elder"),
+                           right=FALSE)
+```
+
+### TODO functions
+
+```{r E-stubs, eval=FALSE}
+fit_nb_stratified <- function(df) {
+  # INPUT: df with age, contacts_outside_hh
+  # OUTPUT: tibble(band, size, mu)
+  TODO("TODO (Section E): implement fit_nb_stratified(df)")
+}
+
+pack_households <- function(hh_sizes) {
+  # INPUT: vector hh_sizes (length Nsyn)
+  # OUTPUT: hh_id (length Nsyn) via greedy packing
+  TODO("TODO (Section E): implement pack_households(hh_sizes)")
+}
+
+sample_outside_hh <- function(people, nb_table) {
+  # INPUT: people with band; nb_table with band/size/mu
+  # OUTPUT: vector contacts_outside_hh
+  TODO("TODO (Section E): implement sample_outside_hh(people, nb_table)")
+}
+
+stub_match <- function(ids, counts, hh_id) {
+  # INPUT: ids, counts, hh_id
+  # OUTPUT: 2-col matrix of outside-household edges
+  TODO("TODO (Section E): implement stub_match(ids, counts, hh_id)")
+}
+
+build_contact_network <- function(people) {
+  # INPUT: people with id, hh_id, contacts_outside_hh
+  # OUTPUT: igraph graph (HH cliques + outside HH edges; simplify)
+  TODO("TODO (Section E): implement build_contact_network(people)")
+}
+
+sensitivity_sweep <- function(people, nb_table,
+                              mu_mult = c(0.8,1,1.2),
+                              size_mult = c(0.8,1,1.2)) {
+  # OUTPUT: tibble(mu_mult, size_mult, mean_k, CC, APL, GCfrac)
+  TODO("TODO (Section E): implement sensitivity_sweep(...)")
+}
+```
+
+### Run pipeline
+
+```{r E-run, eval=FALSE}
+nb_by_band <- fit_nb_stratified(contacts_df)
+nb_by_band
+
+Nsyn <- 5000
+hh_prob <- prop.table(table(contacts_df$hh_size))
+
+people <- tibble(
+  id = 1:Nsyn,
+  hh_size = sample(as.integer(names(hh_prob)), Nsyn, replace=TRUE, prob=as.numeric(hh_prob))
+)
+
+people$hh_id <- pack_households(people$hh_size)
+people$age <- sample(0:80, Nsyn, replace=TRUE)
+people$band <- cut_age(people$age)
+
+people$contacts_outside_hh <- sample_outside_hh(people, nb_by_band)
+
+g_contact <- build_contact_network(people)
+
+deg <- degree(g_contact)
+metrics_contact <- tibble(
+  mean_k = mean(deg),
+  var_k  = var(deg),
+  CC     = transitivity(g_contact, "global"),
+  APL    = safe_mean_distance(g_contact),
+  GCfrac = max(components(g_contact)$csize)/Nsyn
+)
+metrics_contact
+
+sens_tbl <- sensitivity_sweep(people, nb_by_band)
+sens_tbl
+```
+
+### Reflection E
+
+* Which elements were estimated from data vs assumed?
+* How do CC and APL change under ±20% NegBin parameter changes?
+
+---
+
+## Submission checklist (max 2 pages of narrative, plots allowed)
+
+* A: metrics table + 2–3 bullets comparing models
+* B: CCDF plot + 1–2 lines on CCDF vs histogram
+* C: your (A^3) clustering code + validation output
+* D: WS transition plots + interpretation
+* E: NB fits, contact network metrics, sensitivity output + brief analysis

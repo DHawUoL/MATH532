@@ -1,0 +1,327 @@
+---
+title: "MATH532 Practical 2 (Student) — Epidemics on Networks"
+output:
+html_document:
+toc: true
+toc_depth: 3
+number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(igraph)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+})
+
+set.seed(124)
+
+# Put Network_model.R in the same folder as this Rmd
+source("Network_model.R")
+```
+
+```{r helpers}
+# Small helpers for plotting and summaries
+estimate_r_early <- function(df, t_max = 8) {
+  # TODO (Section B):
+  # Estimate an early exponential growth rate r by fitting:
+  #   log(prevalence) ~ time
+  # on a short early window (time <= t_max)
+  #
+  # Hints:
+  # - filter to time <= t_max
+  # - use y <- pmax(prevalence, 1e-9) to avoid log(0)
+  # - fit <- lm(log(y) ~ time, data = ...)
+  # - return slope coefficient
+  stop("TODO: implement estimate_r_early(df, t_max)")
+}
+
+gc_fraction <- function(A) {
+  # GC fraction for an adjacency matrix A
+  g <- graph_from_adjacency_matrix(A, mode = "undirected", diag = FALSE)
+  max(components(g)$csize) / nrow(A)
+}
+```
+
+---
+
+## Section A — Epidemics across graph families (guided)
+
+### Instructions
+
+1. Construct 4 graphs (ER, small-world, preferential attachment, modular).
+2. Simulate SIR outbreaks with **neutral calibration**:
+
+   * `calib_mode = "pre_removal_biology"`
+3. Plot prevalence trajectories by graph family.
+4. Write 2–3 bullets comparing shapes (peak timing, peak height, persistence).
+
+### Provided code (run as-is)
+
+```{r A-graphs}
+N <- 500
+
+A_er  <- Matrix(makeNetwork("rand", N=N), sparse=TRUE)
+
+# Small-world graph with a custom rewiring probability
+g_ws <- sample_smallworld(1, N, nei = 5, p = 0.02)
+g_ws <- as.undirected(g_ws, mode = "collapse")
+g_ws <- simplify(g_ws)
+A_ws <- as_adj(g_ws, sparse = TRUE)
+
+A_pa  <- Matrix(makeNetwork("prefAtt", N=N), sparse=TRUE)
+A_mod <- Matrix(makeNetwork("randMod", N=N), sparse=TRUE)
+
+graphs <- list(ER = A_er, WS = A_ws, PA = A_pa, Modular = A_mod)
+
+TSPAN <- seq(0, 40, by = 0.1)
+```
+
+```{r A-run}
+res_list <- lapply(names(graphs), function(nm) {
+  A <- graphs[[nm]]
+  out <- runSimulation(
+    A, R0 = 2,
+    frac = 0,
+    removal_by = "rand",
+    calib_mode = "pre_removal_biology",
+    modelType = "SIR",
+    T_R = 3, T_E = 2,
+    TSPAN = TSPAN,
+    n_runs = 3,
+    seed_mode = "fixed",
+    fixed_nodes = 1:10,
+    n_seeds = 10,
+    global_seed = 99
+  )
+  out$graph <- nm
+  out
+})
+
+df_all <- bind_rows(res_list)
+
+ggplot(df_all, aes(time, prevalence, color = sim)) +
+  geom_line(alpha = 0.7) +
+  facet_wrap(~ graph, scales = "free_y") +
+  theme_minimal() +
+  labs(title="Epidemics across graph families (neutral calibration)",
+       y="Prevalence", x="Time")
+```
+
+### Reflection A (2–3 bullets)
+
+* Which graph produces the earliest peak? Which produces the latest?
+* Which produces the highest peak? Any surprises?
+
+---
+
+## Section B — Structural proxy vs observed early growth (medium DIY)
+
+### Instructions
+
+1. Compute `neutral_moments()` for each graph.
+2. Interpret:
+
+   * `knbr - 1` as a **structural epidemic potential proxy** (neutral approximation).
+3. Implement an early growth estimator `estimate_r_early()` and compare across graphs.
+
+```{r B-moments}
+mom_tbl <- lapply(names(graphs), function(nm) {
+  A <- graphs[[nm]]
+  m <- neutral_moments(A)
+  tibble(graph = nm, mk = m$mk, vk = m$vk, knbr = m$knbr, proxy = (m$knbr - 1))
+}) |> bind_rows()
+
+mom_tbl
+```
+
+```{r B-growth, eval=FALSE}
+# Runs after you implement estimate_r_early()
+
+r_tbl <- df_all %>%
+  group_by(graph, sim) %>%
+  summarise(r_hat = estimate_r_early(cur_data_all(), t_max = 8), .groups = "drop") %>%
+  group_by(graph) %>%
+  summarise(r_median = median(r_hat, na.rm = TRUE), .groups = "drop")
+
+r_tbl
+```
+
+### Reflection B
+
+* Does the proxy (`knbr - 1`) agree with the ranking of early growth rates?
+* Why might clustering or modularity weaken the proxy?
+
+---
+
+## Section C — Two calibration modes under degree-targeted removal (higher DIY)
+
+### Instructions
+
+We will compare two calibration logics:
+
+* **Mode 1: `pre_removal_biology`**
+  Calibrate (\beta) on the original network, then remove nodes and keep (\beta) fixed.
+  (“Same pathogen; changed system.”)
+
+* **Mode 2: `post_removal_sameR0`**
+  Remove nodes first, then recalibrate (\beta) to force the same headline (R_0).
+  (“Same (R_0) by construction; not the same pathogen.”)
+
+**Task:** Implement the nested loop and plot prevalence vs time.
+
+```{r C-stub, eval=FALSE}
+# TODO (Section C): write a nested loop over frac_vals and mode_vals
+
+A_base <- graphs[["PA"]]
+frac_vals <- c(0.0, 0.1, 0.2, 0.3)
+mode_vals <- c("pre_removal_biology","post_removal_sameR0")
+
+# TODO: build df_modes with columns time, prevalence, sim, frac, mode
+# Hints:
+# - for each mode_ in mode_vals:
+#   - for each fr in frac_vals:
+#       out <- runSimulation(A_base, R0=2, frac=fr, removal_by="degree",
+#                            calib_mode=mode_, modelType="SIR",
+#                            T_R=3, TSPAN=TSPAN, n_runs=3,
+#                            seed_mode="fixed", fixed_nodes=1:10,
+#                            n_seeds=10, global_seed=123)
+#       add columns frac and mode, then bind_rows
+
+# df_modes <- ...
+
+ggplot(df_modes, aes(time, prevalence, group = sim, color = factor(frac))) +
+  geom_line(alpha = 0.6) +
+  facet_wrap(~ mode, scales = "free_y") +
+  theme_minimal() +
+  labs(title="Calibration modes under degree-targeted removal",
+       x="Time", y="Prevalence", color="Removed fraction")
+```
+
+### Reflection C
+
+* Which calibration mode makes the intervention look “more effective”, and why?
+* Which mode corresponds to “same pathogen biology”?
+
+---
+
+## Section D — Random vs degree-targeted removal + giant component (higher DIY)
+
+### Instructions
+
+1. For the PA graph, remove fractions (f\in{0,0.1,0.2,0.3}).
+2. Compare `by="rand"` vs `by="degree"`.
+3. Plot **giant component fraction** vs removed fraction.
+4. Explain why this relates to epidemic size.
+
+```{r D-stub, eval=FALSE}
+# TODO (Section D): implement gc_tbl
+
+A0 <- graphs[["PA"]]
+removals <- expand.grid(
+  frac = c(0.0, 0.1, 0.2, 0.3),
+  by = c("rand","degree"),
+  KEEP.OUT.ATTRS = FALSE
+)
+
+# gc_tbl <- ...
+
+ggplot(gc_tbl, aes(frac, GCfrac, color = by)) +
+  geom_line() + geom_point() +
+  theme_minimal() +
+  labs(title="Giant component fraction vs node removal",
+       x="Removed fraction", y="GC fraction")
+```
+
+### Reflection D
+
+* Why does degree-targeted removal reduce GC fraction faster on PA graphs?
+
+---
+
+## Section E — Ring lattice vs small-world: wavefront vs shortcuts (core demo)
+
+### Instructions
+
+1. Construct a **ring lattice** (WS with (p=0)) and a **small-world** graph (tiny (p)).
+2. Run simulations with the same calibration mode (`pre_removal_biology`).
+3. Compare growth shapes and comment on “linear-ish” wavefront growth vs shortcut seeding.
+
+```{r E-stub, eval=FALSE}
+# TODO (Section E): build A_ring and A_sw and run both
+
+nei <- 5
+
+# Ring lattice (p=0)
+# g_ring <- sample_smallworld(1, N, nei=nei, p=0)
+# ...
+
+# Small-world with very small p
+# g_sw <- sample_smallworld(1, N, nei=nei, p=0.01)
+# ...
+
+# df_sw <- bind_rows(
+#   runSimulation(A_ring, R0=2, calib_mode="pre_removal_biology", T_R=3, TSPAN=TSPAN, n_runs=2,
+#                 seed_mode="fixed", fixed_nodes=1:10, n_seeds=10, global_seed=7) |> mutate(kind="Ring (p=0)"),
+#   runSimulation(A_sw,   R0=2, calib_mode="pre_removal_biology", T_R=3, TSPAN=TSPAN, n_runs=2,
+#                 seed_mode="fixed", fixed_nodes=1:10, n_seeds=10, global_seed=8) |> mutate(kind="WS (small p)")
+# )
+
+# ggplot(df_sw, aes(time, prevalence, color = sim)) + geom_line() +
+#   facet_wrap(~ kind, scales = "free_y") + theme_minimal() +
+#   labs(title="Ring wavefront vs small-world shortcuts", x="Time", y="Prevalence")
+```
+
+### Reflection E
+
+* Why can growth be close to linear on a ring lattice even when (R_0) is large?
+* What do shortcuts change geometrically?
+
+---
+
+## Optional extension (choose ONE)
+
+* **Seeding strategies:** compare `seed_mode="random"` vs `seed_mode="high_degree"` on PA.
+* **Use your Prac1 contact network:** load an adjacency matrix you saved in Prac1 and compare it to PA/WS.
+
+*(If you do this, include one figure + one paragraph.)*
+
+---
+
+## Write-up template (max 2 pages)
+
+### A. Graph families + baseline epidemics (2–3 bullets)
+
+* Bullet 1:
+* Bullet 2:
+* Bullet 3 (optional):
+
+### B. Proxy vs early growth (short paragraph)
+
+* What did `knbr-1` suggest?
+* Did early growth agree?
+
+### C. Calibration modes under removal (short paragraph)
+
+* Which mode corresponds to “same biology”?
+* What changes in interpretation?
+
+### D. GC fraction and intervention (short paragraph)
+
+* What does GC fraction capture?
+* Why does targeting matter?
+
+### E. Ring vs small-world (short paragraph)
+
+* Describe the qualitative difference and why it happens.

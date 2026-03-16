@@ -1,0 +1,352 @@
+---
+title: "MATH532 Practical 1 (Answers) — Networks & Metrics (LO2)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(igraph)
+  library(tidyverse)
+  library(MASS)
+})
+
+set.seed(532)
+
+safe_mean_distance <- function(g) suppressWarnings(mean_distance(g, unconnected = TRUE))
+
+giant_component_vertices <- function(g) {
+  cc <- components(g)
+  which(cc$membership == which.max(cc$csize))
+}
+```
+
+---
+
+## Section A — Graph families & baseline metrics
+
+```{r A-builders}
+build_er <- function(N, p = 0.0025) {
+  erdos.renyi.game(N, p.or.m = p, type = "gnp", directed = FALSE)
+}
+
+build_ws <- function(N, nei = 5, p = 0) {
+  g <- sample_smallworld(1, N, nei = nei, p = p)
+  g <- as.undirected(g, "collapse")
+  simplify(g)
+}
+
+build_pa <- function(N, m = 3) {
+  sample_pa(N, m = m, directed = FALSE)
+}
+
+build_modular <- function(N, islands.n = 6, pin = 0.15, n.inter = 50) {
+  g <- sample_islands(islands.n, floor(N / islands.n), pin, n.inter)
+  simplify(g)
+}
+
+build_config_from_deg <- function(k) {
+  g <- tryCatch(
+    sample_degseq(k, method = "simple.no.multiple"),
+    error = function(e) sample_degseq(k, method = "simple")
+  )
+  g <- as.undirected(g, "collapse")
+  simplify(g)
+}
+```
+
+```{r A-metrics}
+N <- 3000
+g_er   <- build_er(N)
+g_ws0  <- build_ws(N, nei = 5, p = 0)
+g_pa   <- build_pa(N, m = 3)
+g_mod  <- build_modular(N)
+g_conf <- build_config_from_deg(degree(g_er))
+
+metrics_tbl <- tibble(
+  model  = c("ER","WS0","PA","Modular","Config(deg=ER)"),
+  mean_k = c(mean(degree(g_er)), mean(degree(g_ws0)),
+             mean(degree(g_pa)), mean(degree(g_mod)), mean(degree(g_conf))),
+  var_k  = c(var(degree(g_er)),  var(degree(g_ws0)),
+             var(degree(g_pa)),  var(degree(g_mod)), var(degree(g_conf))),
+  CC     = c(transitivity(g_er,"global"), transitivity(g_ws0,"global"),
+             transitivity(g_pa,"global"), transitivity(g_mod,"global"),
+             transitivity(g_conf,"global")),
+  APL    = c(safe_mean_distance(g_er), safe_mean_distance(g_ws0),
+             safe_mean_distance(g_pa), safe_mean_distance(g_mod),
+             safe_mean_distance(g_conf)),
+  GCfrac = c(max(components(g_er)$csize)/N,
+             max(components(g_ws0)$csize)/N,
+             max(components(g_pa)$csize)/N,
+             max(components(g_mod)$csize)/N,
+             max(components(g_conf)$csize)/N)
+)
+
+metrics_tbl
+```
+
+---
+
+## Section B — CCDF
+
+```{r B-ccdf}
+
+compute_ccdf <- function(k) {
+  tab <- as.data.frame(table(k))
+  names(tab) <- c("k", "Freq")
+  tab$k <- as.numeric(as.character(tab$k))
+
+  # Ensure all degrees are present
+  all_k <- data.frame(k = 0:max(k))
+  tab   <- merge(all_k, tab, by = "k", all.x = TRUE)
+  tab$Freq[is.na(tab$Freq)] <- 0
+
+  tab <- tab[order(tab$k), ]
+  tab$pmf  <- tab$Freq / sum(tab$Freq)
+  tab$ccdf <- rev(cumsum(rev(tab$pmf)))
+
+  dplyr::as_tibble(tab)
+}
+
+ccdf_df <- bind_rows(
+  compute_ccdf(degree(g_er))  |> mutate(model="ER"),
+  compute_ccdf(degree(g_ws0)) |> mutate(model="WS0"),
+  compute_ccdf(degree(g_pa))  |> mutate(model="PA"),
+  compute_ccdf(degree(g_mod)) |> mutate(model="Modular")
+)
+
+ggplot(ccdf_df, aes(k, ccdf, color=model)) +
+  geom_line() +
+  scale_x_log10() + scale_y_log10() +
+  theme_minimal() +
+  labs(title="Degree CCDF", y="P(K ≥ k)")
+```
+
+---
+
+## Section C — Local clustering via (A^3)
+
+```{r C-clustering}
+local_clustering_A3 <- function(A) {
+  k <- rowSums(A)
+  tri <- diag(A %*% A %*% A) / 2
+  C <- numeric(nrow(A))
+  idx <- which(k >= 2)
+  C[idx] <- (2 * tri[idx]) / (k[idx] * (k[idx] - 1))
+  C
+}
+
+global_from_local <- function(A) {
+  C <- local_clustering_A3(A)
+  k <- rowSums(A)
+  mean(C[k >= 2], na.rm = TRUE)
+}
+
+idx <- sample(giant_component_vertices(g_ws0), 1200)
+A_sub <- as.matrix(as_adj(g_ws0, sparse=FALSE))[idx, idx]
+g_sub <- induced_subgraph(g_ws0, idx)
+
+C_loc <- global_from_local(A_sub)
+C_igr <- transitivity(g_sub, "global")
+
+cat("Global C (A^3 method) =", C_loc, "\n")
+cat("igraph transitivity    =", C_igr, "\n")
+```
+
+---
+
+## Section D — Watts–Strogatz scan
+
+```{r D-ws}
+ws_scan <- function(N, nei, p_grid, C0, L0) {
+  out <- vector("list", length(p_grid))
+  for (i in seq_along(p_grid)) {
+    p <- p_grid[i]
+    g <- build_ws(N, nei, p)
+    C_here <- transitivity(g, "global")
+    L_here <- safe_mean_distance(g)
+    out[[i]] <- tibble(p = p, C_ratio = C_here / C0, L_ratio = L_here / L0)
+  }
+  bind_rows(out)
+}
+
+p_grid <- c(1e-8,1e-6,1e-5,1e-4,1e-3,1e-2,1e-1,3e-1,1)
+C0 <- transitivity(g_ws0,"global")
+L0 <- safe_mean_distance(g_ws0)
+
+sw <- ws_scan(N=3000, nei=5, p_grid=p_grid, C0=C0, L0=L0)
+
+ggplot(sw, aes(p, C_ratio)) +
+  geom_line() + scale_x_log10() +
+  theme_minimal() + labs(title="C(p)/C(0)")
+
+ggplot(sw, aes(p, L_ratio)) +
+  geom_line() + scale_x_log10() +
+  theme_minimal() + labs(title="L(p)/L(0)")
+```
+
+---
+
+## Section E — Contact network from diary-like data
+
+```{r E-data}
+file_path <- "contact_survey_clean.csv"
+if (!file.exists(file_path)) {
+  contacts_df <- tibble(
+    id=1:2000,
+    age=sample(0:80, 2000, replace=TRUE),
+    hh_size=sample(1:6, 2000, replace=TRUE, prob=c(.30,.30,.18,.12,.06,.04)),
+    contacts_outside_hh=rnbinom(2000, size=2, mu=6)
+  )
+} else {
+  contacts_df <- readr::read_csv(file_path, show_col_types=FALSE)
+}
+
+cut_age <- function(x) cut(x, breaks=c(-Inf,12,25,65,Inf),
+                           labels=c("child","young","adult","elder"),
+                           right=FALSE)
+```
+
+```{r E-functions}
+fit_nb_stratified <- function(df) {
+  df %>%
+    mutate(band = cut_age(age)) %>%
+    group_by(band) %>%
+    summarise(
+      size = fitdistr(contacts_outside_hh, "negative binomial")$estimate["size"],
+      mu   = fitdistr(contacts_outside_hh, "negative binomial")$estimate["mu"],
+      .groups="drop"
+    )
+}
+
+pack_households <- function(hh_sizes) {
+  Nsyn <- length(hh_sizes)
+  hh_id <- integer(Nsyn)
+  cursor <- 1; hid <- 1
+  while (cursor <= Nsyn) {
+    s <- hh_sizes[cursor]
+    end <- min(cursor + s - 1, Nsyn)
+    hh_id[cursor:end] <- hid
+    hid <- hid + 1
+    cursor <- end + 1
+  }
+  hh_id
+}
+
+sample_outside_hh <- function(people, nb_table) {
+  get_nb_params <- function(b) {
+    row <- nb_table[nb_table$band == b, , drop = FALSE]
+    if (nrow(row) == 0) return(list(size = 2, mu = 6))
+    size <- as.numeric(row$size[[1]])
+    mu   <- as.numeric(row$mu[[1]])
+    if (!is.finite(size) || size <= 0) size <- 2
+    if (!is.finite(mu)   || mu < 0)    mu <- 6
+    list(size = size, mu = mu)
+  }
+
+  bands <- as.character(people$band)
+  vapply(bands, function(b) {
+    prm <- get_nb_params(b)
+    rnbinom(1, size = prm$size, mu = prm$mu)
+  }, numeric(1))
+}
+
+stub_match <- function(ids, counts, hh_id) {
+  stubs <- rep(ids, times = counts)
+  if (length(stubs) < 2) return(matrix(0, ncol=2))
+  if (length(stubs) %% 2 == 1) stubs <- stubs[-1]
+  stubs <- sample(stubs)
+  pairs <- matrix(stubs, ncol = 2, byrow = TRUE)
+  ok <- hh_id[pairs[,1]] != hh_id[pairs[,2]]
+  pairs[ok, , drop = FALSE]
+}
+
+build_contact_network <- function(people) {
+  Nsyn <- nrow(people)
+  g <- make_empty_graph(n = Nsyn, directed = FALSE)
+
+  hh_groups <- split(people$id, people$hh_id)
+  for (grp in hh_groups) {
+    if (length(grp) >= 2) g <- add_edges(g, as.vector(t(combn(grp,2))))
+  }
+
+  pairs_ok <- stub_match(people$id, people$contacts_outside_hh, people$hh_id)
+  if (nrow(pairs_ok) > 0) g <- add_edges(g, as.vector(t(pairs_ok)))
+
+  simplify(g)
+}
+
+sensitivity_sweep <- function(people, nb_table,
+                              mu_mult = c(0.8,1,1.2),
+                              size_mult = c(0.8,1,1.2)) {
+  out <- list(); idx <- 1
+  for (am in mu_mult) for (as in size_mult) {
+    nb_scaled <- nb_table %>% mutate(mu = mu * am, size = size * as)
+    tmp <- people
+    tmp$contacts_outside_hh <- sample_outside_hh(tmp, nb_scaled)
+    g <- build_contact_network(tmp)
+    dk <- degree(g)
+    out[[idx]] <- tibble(
+      mu_mult = am, size_mult = as,
+      mean_k = mean(dk),
+      CC = transitivity(g, "global"),
+      APL = safe_mean_distance(g),
+      GCfrac = max(components(g)$csize) / nrow(tmp)
+    )
+    idx <- idx + 1
+  }
+  bind_rows(out)
+}
+```
+
+```{r E-run}
+nb_by_band <- fit_nb_stratified(contacts_df)
+nb_by_band
+
+Nsyn <- 5000
+hh_prob <- prop.table(table(contacts_df$hh_size))
+
+people <- tibble(
+  id = 1:Nsyn,
+  hh_size = sample(as.integer(names(hh_prob)), Nsyn, replace=TRUE, prob=as.numeric(hh_prob))
+)
+
+people$hh_id <- pack_households(people$hh_size)
+people$age <- sample(0:80, Nsyn, replace=TRUE)
+people$band <- cut_age(people$age)
+
+people$contacts_outside_hh <- sample_outside_hh(people, nb_by_band)
+
+g_contact <- build_contact_network(people)
+
+deg <- degree(g_contact)
+metrics_contact <- tibble(
+  mean_k = mean(deg),
+  var_k  = var(deg),
+  CC     = transitivity(g_contact, "global"),
+  APL    = safe_mean_distance(g_contact),
+  GCfrac = max(components(g_contact)$csize)/Nsyn
+)
+metrics_contact
+
+sens_tbl <- sensitivity_sweep(people, nb_by_band)
+sens_tbl
+
+ggplot(sens_tbl, aes(mu_mult, CC, color=factor(size_mult))) +
+  geom_line() + geom_point() +
+  theme_minimal() +
+  labs(title="Sensitivity of clustering to NB parameters", color="size multiplier")
+```
